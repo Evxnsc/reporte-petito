@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "38670485011",
+    "project_id": "reporte-petito-60ee3",
+    "storage_bucket": "reporte-petito-60ee3.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:38670485011:android:d39ae7a5fb58cb7192a1e6",
+        "android_client_info": {
+          "package_name": "com.example.reporte_petito"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDVR0J__zedfKlT8UG_etGZEbqRUJxzMGc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
