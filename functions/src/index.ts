@@ -1,93 +1,142 @@
-// Importa las herramientas necesarias de Firebase (V2)
-import {onSchedule, ScheduledEvent} from "firebase-functions/v2/scheduler";
+// 1. IMPORTACIONES
+// Importamos 'onSchedule' (para la limpieza) y 'onDocumentCreated' (para el chat)
+import { onSchedule } from "firebase-functions/v2/scheduler";
+import { onDocumentCreated } from "firebase-functions/v2/firestore"; // <--- NUEVA IMPORTACIÓN
 import * as admin from "firebase-admin";
 import * as logger from "firebase-functions/logger";
 
-// Inicializa la app de "admin"
+// 2. INICIALIZACIÓN
 admin.initializeApp();
 
-// Obtenemos acceso a Firestore y al bucket (cubeta) de Storage
 const db = admin.firestore();
 const storage = admin.storage().bucket();
 
-/**
- * Función programada (cron job) para limpiar reportes antiguos.
- * Esta es la sintaxis V2 corregida.
- */
-export const limpiarReportesAntiguos = onSchedule(
+// ==================================================================
+// FUNCIÓN 1: Limpieza Semanal (TU CÓDIGO ORIGINAL INTACTO)
+// ==================================================================
+export const borrarReportesSemanales = onSchedule(
   {
-    schedule: "every day 03:00",
-    timeZone: "America/Mexico_City", // ¡Importante! Usa tu zona horaria
+    schedule: "every monday 03:00", // Se ejecuta cada lunes en la madrugada
+    timeZone: "America/Mexico_City",
   },
-  // Usamos _event para que sepa que no usamos el parámetro (arregla 'unused-vars')
-  async (_event: ScheduledEvent) => {
-    logger.info("Iniciando la limpieza de reportes antiguos...");
+  async (event) => {
+    logger.info("Iniciando limpieza semanal de reportes...");
 
-    // 1. Calcula la fecha de "hace 2 días"
+    // 1. Calcular la fecha de hace 7 DÍAS (168 horas)
     const ahora = admin.firestore.Timestamp.now();
-    const dosDiasAtras = admin.firestore.Timestamp.fromMillis(
-      ahora.toMillis() - 48 * 60 * 60 * 1000 // 48 horas
+    const millisSieteDias = 7 * 24 * 60 * 60 * 1000; // 7 días en milisegundos
+    const fechaLimite = admin.firestore.Timestamp.fromMillis(
+      ahora.toMillis() - millisSieteDias
     );
 
-    // 2. Busca en Firestore los reportes para borrar
+    // 2. Buscar reportes viejos
     const reportesAntiguos = await db
       .collection("reportes")
-      .where("fechaPublicacion", "<=", dosDiasAtras)
+      .where("fechaPublicacion", "<=", fechaLimite)
       .get();
 
     if (reportesAntiguos.empty) {
-      logger.info("No se encontraron reportes antiguos para borrar.");
+      logger.info("No hay reportes antiguos (de más de 7 días) para borrar.");
       return;
     }
 
     logger.info(`Encontrados ${reportesAntiguos.size} reportes para borrar.`);
 
     const batch = db.batch();
-    // Arreglamos el 'any' (es solo una advertencia, pero es mejor así)
-    const promesasDeBorradoStorage: Promise<any>[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const promesasBorradoFotos: Promise<any>[] = [];
 
-    // 4. Recorre cada reporte encontrado
+    // 3. Recorrer y preparar borrado
     reportesAntiguos.forEach((doc) => {
-      const reporte = doc.data();
-      const fotoUrl = reporte.fotoUrl;
+      const data = doc.data();
+      const fotoUrl = data["fotoUrl"];
 
-      // A. Borrar la foto de Storage
+      // Borrar foto de Storage si existe
       if (fotoUrl) {
         try {
           const decodedUrl = decodeURIComponent(fotoUrl);
+          // Extraer path del archivo de la URL
           const filePath = decodedUrl.substring(
             decodedUrl.indexOf("/o/") + 3,
             decodedUrl.indexOf("?alt=media")
           );
 
-          const refFoto = storage.file(filePath);
-          promesasDeBorradoStorage.push(refFoto.delete());
-          logger.info(`Marcando para borrar foto: ${filePath}`);
+          const fileRef = storage.file(filePath);
+          promesasBorradoFotos.push(fileRef.delete());
         } catch (error) {
-          // Arreglamos la línea larga (max-len)
-          logger.error(
-            "Error al procesar la URL de la foto",
-            {fotoUrl, error}
-          );
+          logger.error("Error extrayendo path de foto", { fotoUrl, error });
         }
       }
 
-      // B. Borrar el documento de Firestore
+      // Borrar documento de Firestore
       batch.delete(doc.ref);
     });
 
-    // 5. Ejecuta todos los borrados
-    try {
-      await Promise.all(promesasDeBorradoStorage);
-      logger.info("Fotos de Storage borradas con éxito.");
+    // 4. Ejecutar todo
+    await Promise.all(promesasBorradoFotos); // Borra las fotos
+    await batch.commit(); // Borra los documentos en la BD
 
-      await batch.commit();
-      logger.info("Documentos de Firestore borrados con éxito.");
-    } catch (error) {
-      logger.error("Error durante el borrado en lote:", error);
-    }
-
-    return;
+    logger.info("Limpieza semanal completada con éxito.");
   }
 );
-// Se añade línea nueva al final para arreglar 'eol-last'
+
+// ==================================================================
+// FUNCIÓN 2: Notificaciones de Chat (LA NUEVA AGREGADA)
+// ==================================================================
+export const enviarNotificacionChat = onDocumentCreated(
+  "chat_rooms/{chatRoomId}/messages/{messageId}",
+  async (event) => {
+    // 1. Obtener los datos del mensaje recién creado
+    const snapshot = event.data;
+    if (!snapshot) {
+      return; // Si no hay datos, no hacemos nada
+    }
+    
+    const mensajeData = snapshot.data();
+    const receiverId = mensajeData.receiverId; // A quién va dirigido
+    const senderEmail = mensajeData.senderEmail; // Quién lo mandó
+    const textoMensaje = mensajeData.message;
+
+    logger.info(`Nuevo mensaje de ${senderEmail} para ${receiverId}`);
+
+    try {
+      // 2. Buscar el token del DESTINATARIO en la colección 'users'
+      const userDoc = await db.collection("users").doc(receiverId).get();
+      
+      if (!userDoc.exists) {
+        logger.warn(`El usuario ${receiverId} no tiene documento en la base de datos.`);
+        return;
+      }
+
+      const userData = userDoc.data();
+      // Usamos el operador ?. por seguridad
+      const fcmToken = userData?.fcmToken;
+
+      if (!fcmToken) {
+        logger.warn(`El usuario ${receiverId} no tiene token FCM registrado.`);
+        return;
+      }
+
+      // 3. Construir la notificación
+      const message = {
+        notification: {
+          title: `Nuevo mensaje de ${senderEmail}`,
+          body: textoMensaje,
+        },
+        token: fcmToken, // La dirección del celular destino
+        data: {
+          // Datos extra para navegación (opcional)
+          click_action: "FLUTTER_NOTIFICATION_CLICK",
+          chatRoomId: event.params.chatRoomId,
+        }
+      };
+
+      // 4. Enviar la notificación
+      await admin.messaging().send(message);
+      logger.info("Notificación enviada con éxito.");
+
+    } catch (error) {
+      logger.error("Error al enviar notificación:", error);
+    }
+  }
+);
